@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <base href="./" />
+  <title>📬 Hydra Mail</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <div class="header-row">
+      <div class="logo">📬 <span>Hydra Mail</span></div>
+      <div class="header-actions">
+        <label class="toggle">
+          <input id="autorefresh" type="checkbox" checked />
+          <span class="toggle-slider"></span>
+          <span class="toggle-label">Auto</span>
+        </label>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Sidebar: mailboxes -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h2>Почтовые ящики</h2>
+        <button id="create-btn" class="btn btn-primary btn-sm" title="Создать новый ящик">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="create-form" id="create-form" style="display:none">
+        <input id="prefix" type="text" placeholder="Префикс (необязательно)" autocomplete="off" />
+        <div class="create-btns">
+          <button id="create-go" class="btn btn-primary btn-sm">Создать</button>
+          <button id="create-cancel" class="btn btn-ghost btn-sm">Отмена</button>
+        </div>
+      </div>
+      <div id="mailboxes" class="mailbox-list"></div>
+    </aside>
+
+    <!-- Center: inbox -->
+    <section class="inbox-panel">
+      <div class="inbox-header">
+        <h2 id="inbox-title">Входящие</h2>
+        <div class="inbox-actions">
+          <button id="refresh-btn" class="btn btn-ghost btn-sm" title="Обновить">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M14 8A6 6 0 1 1 8 2m0 0v4m0-4h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button id="clear-btn" class="btn btn-danger btn-sm" title="Очистить inbox">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="inbox" class="email-list"></div>
+    </section>
+
+    <!-- Right: email viewer -->
+    <section class="viewer-panel">
+      <div class="viewer-header" id="viewer-header" style="display:none">
+        <div class="viewer-meta">
+          <div class="viewer-subject" id="viewer-subject"></div>
+          <div class="viewer-from" id="viewer-from"></div>
+        </div>
+        <button id="delete-email-btn" class="btn btn-danger btn-sm" title="Удалить письмо">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 4h12M5 4V3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1m2 0v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4h10z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+      <div id="viewer-body" class="viewer-body">
+        <div class="empty-state">
+          <div class="empty-icon">📭</div>
+          <div class="empty-text">Выберите письмо для просмотра</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div id="status" class="status">Загрузка…</div>
+  </footer>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
