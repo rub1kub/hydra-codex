@@ -12,6 +12,14 @@
     <div class="header-row">
       <div class="logo">📬 <span>Hydra Mail</span></div>
       <div class="header-actions">
+        <label class="theme-wrap" title="Тема интерфейса">
+          <span class="theme-label">Тема</span>
+          <select id="theme-select" class="theme-select">
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+            <option value="auto">Auto</option>
+          </select>
+        </label>
         <label class="toggle">
           <input id="autorefresh" type="checkbox" checked />
           <span class="toggle-slider"></span>
@@ -63,9 +71,17 @@
           <div class="viewer-subject" id="viewer-subject"></div>
           <div class="viewer-from" id="viewer-from"></div>
         </div>
-        <button id="delete-email-btn" class="btn btn-danger btn-sm" title="Удалить письмо">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 4h12M5 4V3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1m2 0v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4h10z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
+        <div class="viewer-actions">
+          <button id="copy-otp-btn" class="btn btn-ghost btn-sm" title="Скопировать OTP" style="display:none">
+            OTP
+          </button>
+          <button id="toggle-unread-btn" class="btn btn-ghost btn-sm" title="Переключить прочитанность">
+            Статус
+          </button>
+          <button id="delete-email-btn" class="btn btn-danger btn-sm" title="Удалить письмо">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 4h12M5 4V3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1m2 0v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4h10z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
       </div>
       <div id="viewer-body" class="viewer-body">
         <div class="empty-state">
