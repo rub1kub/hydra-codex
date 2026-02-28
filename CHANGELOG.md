@@ -17,3 +17,17 @@
 
 ### Notes
 - Mailbox emojis (logo/empty states) were intentionally kept.
+
+## 2026-02-28 (update 2)
+
+### Added
+- Inbox search bar (subject/from/code).
+- Inbox filters: `All / Unread / OTP`.
+- "Load more" pagination button in inbox.
+- Retention selector in header (`∞ / 7 / 30 / 90`) via `GET/POST /api/settings`.
+- Daily DB backup script + cron (`/etc/cron.d/temp-mail-backup`, 03:15 MSK).
+
+### Changed
+- Mailbox badge now shows unread count only (hidden when unread = 0).
+- Backend email listing now supports pagination (`limit`, `offset`, `total`, `hasMore`).
+- Retention is now runtime-configurable (default `0` = keep indefinitely).

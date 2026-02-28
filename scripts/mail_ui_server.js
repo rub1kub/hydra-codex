@@ -20,6 +20,7 @@ const UI_DIR = path.join(SKILL_DIR, 'ui', 'mail');
 const DATA_DIR = path.join(SKILL_DIR, 'data');
 const MAILBOXES_FILE = path.join(DATA_DIR, 'mailboxes.json');
 const ARCHIVE_FILE = path.join(DATA_DIR, 'email_archive.json');
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
 // Auto-load .env
 const envPath = path.join(SKILL_DIR, '.env');
@@ -186,6 +187,21 @@ function readArchive() {
 
 function writeArchive(archive) {
   writeJson(ARCHIVE_FILE, archive);
+}
+
+function normalizeRetentionDays(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.floor(n);
+}
+
+function readSettings() {
+  const raw = readJson(SETTINGS_FILE, { retentionDays: 0 });
+  return { retentionDays: normalizeRetentionDays(raw?.retentionDays ?? 0) };
+}
+
+function writeSettings(settings) {
+  writeJson(SETTINGS_FILE, { retentionDays: normalizeRetentionDays(settings?.retentionDays ?? 0) });
 }
 
 function extractEmailList(payload) {
@@ -358,6 +374,20 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { ok: true, data: mb });
   }
 
+  // GET /api/settings
+  if (req.method === 'GET' && url.pathname === '/api/settings') {
+    return sendJson(res, 200, { ok: true, data: readSettings() });
+  }
+
+  // POST /api/settings { retentionDays }
+  if (req.method === 'POST' && url.pathname === '/api/settings') {
+    const body = await readJsonBody(req);
+    const current = readSettings();
+    const next = { retentionDays: normalizeRetentionDays(body?.retentionDays ?? current.retentionDays) };
+    writeSettings(next);
+    return sendJson(res, 200, { ok: true, data: next });
+  }
+
   // POST /api/mailboxes  {prefix?}
   if (req.method === 'POST' && url.pathname === '/api/mailboxes') {
     const body = await readJsonBody(req);
@@ -422,10 +452,13 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { ok: true, data: mb });
   }
 
-  // GET /api/emails?email=
+  // GET /api/emails?email=&limit=&offset=
   if (req.method === 'GET' && url.pathname === '/api/emails') {
     const email = url.searchParams.get('email');
     if (!email) return sendJson(res, 400, { ok: false, error: 'email required' });
+
+    const limit = Math.max(1, Math.min(500, Number(url.searchParams.get('limit') || 100)));
+    const offset = Math.max(0, Number(url.searchParams.get('offset') || 0));
 
     let remote;
     try {
@@ -449,11 +482,29 @@ async function handleApi(req, res, url) {
     pruneArchive(archive);
     writeArchive(archive);
 
+    const total = merged.length;
+    const page = merged.slice(offset, offset + limit);
+    const hasMore = offset + page.length < total;
+
     return sendJson(res, 200, {
       ok: true,
       data: {
         success: true,
-        data: { emails: merged },
+        data: {
+          emails: page,
+          pagination: {
+            limit,
+            offset,
+            total,
+            hasMore,
+          }
+        },
+        pagination: {
+          limit,
+          offset,
+          total,
+          hasMore,
+        },
         meta: {
           remoteOk: !!remote.json?.success,
           remoteCount: remoteEmails.length,

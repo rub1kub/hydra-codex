@@ -20,6 +20,15 @@
             <option value="auto">Auto</option>
           </select>
         </label>
+        <label class="theme-wrap" title="Срок хранения писем">
+          <span class="theme-label">Retention</span>
+          <select id="retention-select" class="theme-select">
+            <option value="0">∞</option>
+            <option value="7">7d</option>
+            <option value="30">30d</option>
+            <option value="90">90d</option>
+          </select>
+        </label>
         <label class="toggle">
           <input id="autorefresh" type="checkbox" checked />
           <span class="toggle-slider"></span>
@@ -61,7 +70,18 @@
           </button>
         </div>
       </div>
+      <div class="inbox-tools">
+        <input id="search-input" class="search-input" type="text" placeholder="Поиск: тема, отправитель, код" />
+        <select id="filter-select" class="filter-select">
+          <option value="all">All</option>
+          <option value="unread">Unread</option>
+          <option value="otp">OTP</option>
+        </select>
+      </div>
       <div id="inbox" class="email-list"></div>
+      <div class="inbox-loadmore-wrap">
+        <button id="load-more-btn" class="btn btn-ghost btn-sm" style="display:none">Загрузить ещё</button>
+      </div>
     </section>
 
     <!-- Right: email viewer -->
@@ -96,7 +116,6 @@
     <div id="status" class="status">Загрузка…</div>
   </footer>
 
-  <!-- Toast notification -->
   <div id="toast" class="toast"></div>
 
   <script src="app.js"></script>

@@ -12,14 +12,21 @@ const ICON_TRASH = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none">
 const state = {
   mailboxes: [],
   selected: null,
-  emails: [],
-  emailCounts: {},       // mailbox -> total count
-  unreadCounts: {},      // mailbox -> unread count
+  emails: [], // loaded page chunks for selected mailbox
+  emailCounts: {},
+  unreadCounts: {},
   selectedEmailId: null,
   selectedEmail: null,
   autoTimer: null,
   readState: loadLocalJson(STORAGE_KEYS.readState, {}),
   themeMode: localStorage.getItem(STORAGE_KEYS.theme) || 'dark',
+  searchQuery: '',
+  filterMode: 'all', // all | unread | otp
+  fetchLimit: 100,
+  fetchOffset: 0,
+  hasMore: false,
+  loadingMore: false,
+  retentionDays: 0,
 };
 
 /* ——— Helpers ——— */
@@ -102,9 +109,7 @@ function saveReadState() {
 
 function getMailboxReadState(mailbox) {
   if (!mailbox) return { seen: {}, unread: {} };
-  if (!state.readState[mailbox]) {
-    state.readState[mailbox] = { seen: {}, unread: {} };
-  }
+  if (!state.readState[mailbox]) state.readState[mailbox] = { seen: {}, unread: {} };
   if (!state.readState[mailbox].seen) state.readState[mailbox].seen = {};
   if (!state.readState[mailbox].unread) state.readState[mailbox].unread = {};
   return state.readState[mailbox];
@@ -112,8 +117,7 @@ function getMailboxReadState(mailbox) {
 
 function isUnread(id, mailbox = state.selected) {
   if (!id || !mailbox) return false;
-  const mbState = getMailboxReadState(mailbox);
-  return !!mbState.unread[String(id)];
+  return !!getMailboxReadState(mailbox).unread[String(id)];
 }
 
 function markRead(id, mailbox = state.selected) {
@@ -134,10 +138,21 @@ function markUnread(id, mailbox = state.selected) {
   saveReadState();
 }
 
+function pruneReadState(mailbox) {
+  const mbState = getMailboxReadState(mailbox);
+  const entries = Object.entries(mbState.seen);
+  if (entries.length <= 2000) return;
+
+  entries.sort((a, b) => Number(a[1] || 0) - Number(b[1] || 0));
+  const toDrop = entries.slice(0, entries.length - 1600);
+  for (const [id] of toDrop) {
+    if (!mbState.unread[id]) delete mbState.seen[id];
+  }
+}
+
 function extractOtp(text) {
   if (!text) return null;
   const src = String(text);
-
   const contextual = [
     /(?:verification|verify|otp|one[-\s]?time|code|код|парол[ья]|подтвержден[ияи])[^\d]{0,24}(\d{4,8})/i,
     /\b(\d{6})\b/,
@@ -187,7 +202,6 @@ async function api(path, opts = {}) {
     ...opts,
   });
   const data = await res.json();
-  // Handle both {ok:true,data:...} and {success:true,data:...} formats
   if (!data.ok && !data.success) throw new Error(data.error || 'API error');
   return data.data;
 }
@@ -199,6 +213,57 @@ async function copyText(text) {
   } catch {
     toast('Не удалось скопировать', 'error');
   }
+}
+
+function normalizeEmails(resp) {
+  const emails = resp?.data?.emails || resp?.emails || [];
+  return emails.map((x) => ({
+    id: x.id,
+    subject: x.subject,
+    from: x.from,
+    from_address: x.from_address,
+    created_at: x.created_at,
+    timestamp: x.timestamp,
+    content: x.content,
+    html_content: x.html_content,
+    html: x.html,
+    text_content: x.text_content,
+    raw_content: x.raw_content,
+  }));
+}
+
+function recomputeUnreadForMailbox(mailbox = state.selected) {
+  if (!mailbox) return;
+  state.unreadCounts[mailbox] = state.emails.reduce(
+    (acc, m) => acc + (isUnread(String(m.id || ''), mailbox) ? 1 : 0),
+    0,
+  );
+}
+
+function getFilteredEmails() {
+  const q = state.searchQuery.trim().toLowerCase();
+
+  return state.emails.filter((msg) => {
+    const id = String(msg.id || '');
+    const otp = getMessageOtp(msg);
+
+    if (state.filterMode === 'unread' && !isUnread(id, state.selected)) return false;
+    if (state.filterMode === 'otp' && !otp) return false;
+
+    if (!q) return true;
+
+    const hay = [
+      msg.subject,
+      msg.from,
+      msg.from_address,
+      otp,
+      msg.content,
+      msg.text_content,
+      msg.raw_content,
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    return hay.includes(q);
+  });
 }
 
 /* ——— Render ——— */
@@ -216,10 +281,7 @@ function renderMailboxes() {
     const div = document.createElement('div');
     div.className = 'mailbox-item' + (mb === state.selected ? ' active' : '');
 
-    const total = state.emailCounts[mb] || 0;
     const unread = state.unreadCounts[mb] || 0;
-    const badgeClass = total > 0 ? `mailbox-badge${unread > 0 ? ' unread' : ''}` : 'mailbox-badge empty';
-    const badgeText = unread > 0 ? String(unread) : String(total);
 
     const title = document.createElement('span');
     title.className = 'mailbox-email';
@@ -227,9 +289,9 @@ function renderMailboxes() {
     title.textContent = mb;
 
     const badge = document.createElement('span');
-    badge.className = badgeClass;
-    badge.textContent = badgeText;
-    badge.title = unread > 0 ? `Непрочитанных: ${unread} / Всего: ${total}` : `Всего: ${total}`;
+    badge.className = unread > 0 ? 'mailbox-badge unread' : 'mailbox-badge empty';
+    badge.textContent = String(unread);
+    badge.title = `Непрочитанных: ${unread}`;
 
     const actions = document.createElement('div');
     actions.className = 'mailbox-actions';
@@ -264,6 +326,16 @@ function renderMailboxes() {
   }
 }
 
+function renderLoadMore() {
+  const btn = $('load-more-btn');
+  if (!btn) return;
+
+  const show = !!state.selected && (state.hasMore || state.loadingMore);
+  btn.style.display = show ? 'inline-flex' : 'none';
+  btn.disabled = state.loadingMore;
+  btn.textContent = state.loadingMore ? 'Загрузка…' : 'Загрузить ещё';
+}
+
 function renderInbox() {
   const root = $('inbox');
   root.innerHTML = '';
@@ -271,24 +343,32 @@ function renderInbox() {
   const title = $('inbox-title');
   if (state.selected) {
     const unread = state.unreadCounts[state.selected] || 0;
+    const total = state.emailCounts[state.selected] || state.emails.length;
     title.textContent = unread > 0
-      ? `Входящие — ${state.emails.length} (новых: ${unread})`
-      : `Входящие — ${state.emails.length}`;
+      ? `Входящие — ${total} (новых: ${unread})`
+      : `Входящие — ${total}`;
   } else {
     title.textContent = 'Входящие';
   }
 
   if (!state.selected) {
     root.innerHTML = '<div class="empty-state"><div class="empty-icon">📬</div><div class="empty-text">Выберите почтовый ящик</div></div>';
+    renderLoadMore();
     return;
   }
 
-  if (!state.emails.length) {
-    root.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">Нет писем</div></div>';
+  const filtered = getFilteredEmails();
+
+  if (!filtered.length) {
+    const emptyText = state.emails.length
+      ? 'Нет писем по фильтру'
+      : 'Нет писем';
+    root.innerHTML = `<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">${emptyText}</div></div>`;
+    renderLoadMore();
     return;
   }
 
-  for (const msg of state.emails) {
+  for (const msg of filtered) {
     const id = String(msg.id);
     const div = document.createElement('div');
     const unreadClass = isUnread(id, state.selected) ? ' email-unread' : '';
@@ -343,6 +423,8 @@ function renderInbox() {
     div.onclick = () => openEmail(msg);
     root.appendChild(div);
   }
+
+  renderLoadMore();
 }
 
 function renderViewer(email) {
@@ -404,11 +486,48 @@ function updateViewerActions(email) {
 
 /* ——— Actions ——— */
 
+async function loadSettings() {
+  try {
+    const settings = await api('api/settings');
+    const days = Number(settings?.retentionDays ?? 0);
+    state.retentionDays = Number.isFinite(days) ? Math.max(0, days) : 0;
+  } catch {
+    state.retentionDays = 0;
+  }
+
+  if ($('retention-select')) $('retention-select').value = String(state.retentionDays);
+}
+
+async function saveRetentionSetting(days) {
+  const value = Number(days);
+  if (!Number.isFinite(value) || value < 0) return;
+
+  const resp = await api('api/settings', {
+    method: 'POST',
+    body: JSON.stringify({ retentionDays: Math.floor(value) }),
+  });
+
+  state.retentionDays = Number(resp?.retentionDays ?? value);
+  if ($('retention-select')) $('retention-select').value = String(state.retentionDays);
+
+  if (state.retentionDays === 0) {
+    toast('Retention: бессрочно', 'success');
+  } else {
+    toast(`Retention: ${state.retentionDays} дней`, 'success');
+  }
+}
+
 async function loadMailboxes() {
   const mb = await api('api/mailboxes');
   state.mailboxes = mb.mailboxes || [];
   state.selected = mb.selected || state.selected;
   renderMailboxes();
+}
+
+function resetPagingState() {
+  state.fetchOffset = 0;
+  state.hasMore = false;
+  state.loadingMore = false;
 }
 
 async function selectMailbox(email) {
@@ -418,10 +537,12 @@ async function selectMailbox(email) {
   state.selectedEmailId = null;
   state.selectedEmail = null;
   state.emails = [];
+  resetPagingState();
+
   renderMailboxes();
   renderInbox();
   renderViewer(null);
-  await refreshInbox();
+  await refreshInbox({ append: false });
 }
 
 async function createMailbox() {
@@ -432,14 +553,20 @@ async function createMailbox() {
   state.selected = mb.selected || null;
   $('prefix').value = '';
   $('create-form').style.display = 'none';
+  state.selectedEmailId = null;
+  state.selectedEmail = null;
+  state.emails = [];
+  resetPagingState();
+
   renderMailboxes();
-  toast(`✅ Создан: ${state.selected}`, 'success');
-  await refreshInbox();
+  renderViewer(null);
+  toast(`Создан: ${state.selected}`, 'success');
+  await refreshInbox({ append: false });
 }
 
 async function deleteMailbox(email) {
   if (!email) return;
-  if (!confirm(`Удалить ящик ${email}?\n\nПисьма этого ящика также будут удалены из локального архива UI.`)) return;
+  if (!confirm(`Удалить ящик ${email}?`)) return;
 
   const mb = await api(`api/mailboxes/${encodeURIComponent(email)}`, { method: 'DELETE' });
   state.mailboxes = mb.mailboxes || [];
@@ -453,13 +580,14 @@ async function deleteMailbox(email) {
   state.selectedEmailId = null;
   state.selectedEmail = null;
   state.emails = [];
+  resetPagingState();
 
   renderMailboxes();
   renderViewer(null);
   renderInbox();
 
   if (state.selected) {
-    await refreshInbox();
+    await refreshInbox({ append: false });
   } else {
     setStatus('Ящик удалён. Создайте новый →');
   }
@@ -467,86 +595,94 @@ async function deleteMailbox(email) {
   toast('Ящик удалён', 'success');
 }
 
-function normalizeEmails(resp) {
-  const emails = resp?.data?.emails || resp?.emails || [];
-  return emails.map(x => ({
-    id: x.id,
-    subject: x.subject,
-    from: x.from,
-    from_address: x.from_address,
-    created_at: x.created_at,
-    timestamp: x.timestamp,
-    content: x.content,
-    html_content: x.html_content,
-    html: x.html,
-    text_content: x.text_content,
-    raw_content: x.raw_content,
-  }));
+function mergeUniqueEmails(base, incoming) {
+  const map = new Map();
+  for (const e of base) map.set(String(e.id), e);
+  for (const e of incoming) map.set(String(e.id), { ...(map.get(String(e.id)) || {}), ...e });
+  return Array.from(map.values()).sort((a, b) => {
+    const ta = new Date(a.created_at || a.timestamp || 0).getTime() || 0;
+    const tb = new Date(b.created_at || b.timestamp || 0).getTime() || 0;
+    return tb - ta;
+  });
 }
 
-function cleanupReadStateForMailbox(mailbox, existingIdsSet) {
-  const mbState = getMailboxReadState(mailbox);
-
-  for (const id of Object.keys(mbState.unread)) {
-    if (!existingIdsSet.has(id)) delete mbState.unread[id];
-  }
-
-  // Keep "seen" history bounded
-  const seenEntries = Object.entries(mbState.seen);
-  if (seenEntries.length > 1500) {
-    seenEntries.sort((a, b) => Number(a[1] || 0) - Number(b[1] || 0));
-    const toDrop = seenEntries.slice(0, seenEntries.length - 1200);
-    for (const [id] of toDrop) {
-      if (!existingIdsSet.has(id) && !mbState.unread[id]) delete mbState.seen[id];
-    }
-  }
-}
-
-async function refreshInbox() {
+async function refreshInbox({ append = false } = {}) {
   if (!state.selected) return;
 
-  const resp = await api(`api/emails?email=${encodeURIComponent(state.selected)}`);
-  state.emails = normalizeEmails(resp);
+  const offset = append ? state.fetchOffset : 0;
+  const limit = state.fetchLimit;
+  const resp = await api(`api/emails?email=${encodeURIComponent(state.selected)}&limit=${limit}&offset=${offset}`);
+  const batch = normalizeEmails(resp);
+
+  if (append) {
+    state.emails = mergeUniqueEmails(state.emails, batch);
+  } else {
+    state.emails = batch;
+  }
+
+  state.fetchOffset = append ? (state.fetchOffset + batch.length) : batch.length;
+
+  const pagination = resp?.data?.pagination || resp?.pagination || {};
+  const total = Number(pagination.total || 0);
+  state.emailCounts[state.selected] = total > 0 ? total : state.emails.length;
+  state.hasMore = Boolean(pagination.hasMore ?? (batch.length >= limit));
 
   const mailbox = state.selected;
   const mbState = getMailboxReadState(mailbox);
-  const existingIds = new Set();
 
   for (const msg of state.emails) {
     const id = String(msg.id || '');
     if (!id) continue;
-    existingIds.add(id);
-
     if (!mbState.seen[id]) {
       mbState.seen[id] = Date.now();
-      mbState.unread[id] = true; // New incoming email
+      mbState.unread[id] = true;
     }
   }
 
-  cleanupReadStateForMailbox(mailbox, existingIds);
+  pruneReadState(mailbox);
   saveReadState();
+  recomputeUnreadForMailbox(mailbox);
 
-  state.emailCounts[mailbox] = state.emails.length;
-  state.unreadCounts[mailbox] = state.emails.reduce((acc, m) => acc + (isUnread(String(m.id || ''), mailbox) ? 1 : 0), 0);
-
-  // If selected email disappeared from list - reset viewer
-  if (state.selectedEmailId && !existingIds.has(String(state.selectedEmailId))) {
-    state.selectedEmailId = null;
-    state.selectedEmail = null;
-    renderViewer(null);
+  if (state.selectedEmailId) {
+    const exists = state.emails.some((m) => String(m.id) === String(state.selectedEmailId));
+    if (!exists && !state.hasMore) {
+      state.selectedEmailId = null;
+      state.selectedEmail = null;
+      renderViewer(null);
+    }
   }
 
   renderInbox();
   renderMailboxes();
-  setStatus(`${state.selected} • ${state.emails.length} писем • непрочитанных: ${state.unreadCounts[mailbox] || 0} • ${new Date().toLocaleTimeString('ru-RU', { timeZone: MOSCOW_TZ, hour: '2-digit', minute: '2-digit' })} МСК`);
+
+  const loaded = state.emails.length;
+  const unread = state.unreadCounts[mailbox] || 0;
+  const totalText = state.emailCounts[mailbox] || loaded;
+  setStatus(`${state.selected} • ${loaded}/${totalText} писем • непрочитанных: ${unread} • ${new Date().toLocaleTimeString('ru-RU', { timeZone: MOSCOW_TZ, hour: '2-digit', minute: '2-digit' })} МСК`);
+}
+
+async function loadMoreInbox() {
+  if (!state.selected || !state.hasMore || state.loadingMore) return;
+  state.loadingMore = true;
+  renderLoadMore();
+
+  try {
+    await refreshInbox({ append: true });
+  } catch (e) {
+    toast('Ошибка: ' + e.message, 'error');
+  } finally {
+    state.loadingMore = false;
+    renderLoadMore();
+  }
 }
 
 async function openEmail(msg) {
   state.selectedEmailId = String(msg.id);
   markRead(state.selectedEmailId);
+  recomputeUnreadForMailbox(state.selected);
+  renderMailboxes();
   renderInbox();
 
-  // Fetch full email
   try {
     const resp = await api(`api/email/${encodeURIComponent(msg.id)}`);
     const full = resp?.data || resp || {};
@@ -555,26 +691,17 @@ async function openEmail(msg) {
     state.selectedEmail = msg;
   }
 
-  // Recompute counters after read action
-  if (state.selected) {
-    state.unreadCounts[state.selected] = state.emails.reduce((acc, m) => acc + (isUnread(String(m.id || ''), state.selected) ? 1 : 0), 0);
-  }
-
-  renderMailboxes();
-  renderInbox();
   renderViewer(state.selectedEmail);
 }
 
 async function deleteEmailById(id, { askConfirm = false } = {}) {
   if (!id) return;
   const emailId = String(id);
-
   if (askConfirm && !confirm('Удалить это письмо?')) return;
 
   try {
     await api(`api/email/${encodeURIComponent(emailId)}`, { method: 'DELETE' });
 
-    // Clean local read/unread markers for all mailboxes
     for (const mb of Object.keys(state.readState)) {
       const mbState = getMailboxReadState(mb);
       delete mbState.unread[emailId];
@@ -582,14 +709,21 @@ async function deleteEmailById(id, { askConfirm = false } = {}) {
     }
     saveReadState();
 
+    state.emails = state.emails.filter((m) => String(m.id) !== emailId);
+    if (state.selected) {
+      state.emailCounts[state.selected] = Math.max(0, (state.emailCounts[state.selected] || 1) - 1);
+      recomputeUnreadForMailbox(state.selected);
+    }
+
     if (String(state.selectedEmailId || '') === emailId) {
       state.selectedEmailId = null;
       state.selectedEmail = null;
       renderViewer(null);
     }
 
+    renderInbox();
+    renderMailboxes();
     toast('Письмо удалено', 'success');
-    await refreshInbox();
   } catch (e) {
     toast('Ошибка: ' + e.message, 'error');
   }
@@ -603,15 +737,16 @@ async function deleteEmail() {
 async function toggleUnreadCurrent() {
   if (!state.selectedEmailId || !state.selected) return;
   const id = String(state.selectedEmailId);
+
   if (isUnread(id, state.selected)) {
     markRead(id, state.selected);
-    toast('✅ Помечено как прочитанное', 'success');
+    toast('Помечено как прочитанное', 'success');
   } else {
     markUnread(id, state.selected);
     toast('Помечено как непрочитанное', 'success');
   }
 
-  state.unreadCounts[state.selected] = state.emails.reduce((acc, m) => acc + (isUnread(String(m.id || ''), state.selected) ? 1 : 0), 0);
+  recomputeUnreadForMailbox(state.selected);
   renderMailboxes();
   renderInbox();
   if (state.selectedEmail) updateViewerActions(state.selectedEmail);
@@ -633,7 +768,6 @@ async function clearInbox() {
   try {
     await api(`api/emails/clear?email=${encodeURIComponent(state.selected)}`, { method: 'DELETE' });
 
-    // Clear local read state for this mailbox
     const mbState = getMailboxReadState(state.selected);
     mbState.seen = {};
     mbState.unread = {};
@@ -641,9 +775,15 @@ async function clearInbox() {
 
     state.selectedEmailId = null;
     state.selectedEmail = null;
+    state.emails = [];
+    state.emailCounts[state.selected] = 0;
+    state.unreadCounts[state.selected] = 0;
+    resetPagingState();
+
     renderViewer(null);
+    renderInbox();
+    renderMailboxes();
     toast('Inbox очищен', 'success');
-    await refreshInbox();
   } catch (e) {
     toast('Ошибка: ' + e.message, 'error');
   }
@@ -654,7 +794,7 @@ function setupAutoRefresh() {
   state.autoTimer = null;
   if (!$('autorefresh').checked) return;
   state.autoTimer = setInterval(() => {
-    refreshInbox().catch(() => {});
+    refreshInbox({ append: false }).catch(() => {});
   }, 5000);
 }
 
@@ -673,33 +813,45 @@ async function init() {
   }
 
   $('theme-select').onchange = (e) => applyTheme(e.target.value, true);
+  $('retention-select').onchange = (e) => saveRetentionSetting(e.target.value).catch((err) => toast('Ошибка: ' + err.message, 'error'));
 
-  // Create form toggle
+  $('search-input').oninput = (e) => {
+    state.searchQuery = String(e.target.value || '');
+    renderInbox();
+  };
+  $('filter-select').onchange = (e) => {
+    state.filterMode = String(e.target.value || 'all');
+    renderInbox();
+  };
+
   $('create-btn').onclick = () => {
     const form = $('create-form');
     form.style.display = form.style.display === 'none' ? 'flex' : 'none';
     if (form.style.display !== 'none') $('prefix').focus();
   };
-  $('create-go').onclick = () => createMailbox().catch(e => toast('Ошибка: ' + e.message, 'error'));
+  $('create-go').onclick = () => createMailbox().catch((e) => toast('Ошибка: ' + e.message, 'error'));
   $('create-cancel').onclick = () => { $('create-form').style.display = 'none'; };
-  $('prefix').onkeydown = (e) => { if (e.key === 'Enter') createMailbox().catch(e2 => toast('Ошибка: ' + e2.message, 'error')); };
+  $('prefix').onkeydown = (e) => { if (e.key === 'Enter') createMailbox().catch((e2) => toast('Ошибка: ' + e2.message, 'error')); };
 
-  // Actions
   $('refresh-btn').onclick = () => {
     $('refresh-btn').classList.add('spinning');
-    refreshInbox().catch(e => toast('Ошибка: ' + e.message, 'error')).finally(() => $('refresh-btn').classList.remove('spinning'));
+    refreshInbox({ append: false })
+      .catch((e) => toast('Ошибка: ' + e.message, 'error'))
+      .finally(() => $('refresh-btn').classList.remove('spinning'));
   };
+
+  $('load-more-btn').onclick = () => loadMoreInbox();
   $('clear-btn').onclick = () => clearInbox();
   $('delete-email-btn').onclick = () => deleteEmail();
   $('toggle-unread-btn').onclick = () => toggleUnreadCurrent();
   $('copy-otp-btn').onclick = () => copyOtpCurrent();
   $('autorefresh').onchange = () => setupAutoRefresh();
 
-  // Load
   try {
     setStatus('Загрузка…');
+    await loadSettings();
     await loadMailboxes();
-    if (state.selected) await refreshInbox();
+    if (state.selected) await refreshInbox({ append: false });
     setupAutoRefresh();
     if (!state.selected) setStatus('Создайте почтовый ящик →');
   } catch (e) {
