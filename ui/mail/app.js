@@ -27,6 +27,10 @@ const state = {
   hasMore: false,
   loadingMore: false,
   retentionDays: 0,
+  sse: null,
+  sseConnected: false,
+  latestTimestamp: 0,
+  sseFailures: 0,
 };
 
 /* ——— Helpers ——— */
@@ -224,12 +228,30 @@ function normalizeEmails(resp) {
     from_address: x.from_address,
     created_at: x.created_at,
     timestamp: x.timestamp,
+    otp_code: x.otp_code,
+    preview_text: x.preview_text,
     content: x.content,
     html_content: x.html_content,
     html: x.html,
     text_content: x.text_content,
     raw_content: x.raw_content,
   }));
+}
+
+function tsSec(v) {
+  if (v == null) return 0;
+  if (typeof v === 'number') return v > 2e10 ? Math.floor(v / 1000) : Math.floor(v);
+  const t = new Date(v).getTime();
+  if (!Number.isFinite(t)) return 0;
+  return Math.floor(t / 1000);
+}
+
+function updateLatestTimestamp() {
+  let maxTs = 0;
+  for (const m of state.emails) {
+    maxTs = Math.max(maxTs, tsSec(m.timestamp || m.created_at));
+  }
+  state.latestTimestamp = maxTs;
 }
 
 function recomputeUnreadForMailbox(mailbox = state.selected) {
@@ -528,6 +550,7 @@ function resetPagingState() {
   state.fetchOffset = 0;
   state.hasMore = false;
   state.loadingMore = false;
+  state.latestTimestamp = 0;
 }
 
 async function selectMailbox(email) {
@@ -543,6 +566,7 @@ async function selectMailbox(email) {
   renderInbox();
   renderViewer(null);
   await refreshInbox({ append: false });
+  setupSSE();
 }
 
 async function createMailbox() {
@@ -562,6 +586,7 @@ async function createMailbox() {
   renderViewer(null);
   toast(`Создан: ${state.selected}`, 'success');
   await refreshInbox({ append: false });
+  setupSSE();
 }
 
 async function deleteMailbox(email) {
@@ -588,7 +613,9 @@ async function deleteMailbox(email) {
 
   if (state.selected) {
     await refreshInbox({ append: false });
+    setupSSE();
   } else {
+    closeSSE();
     setStatus('Ящик удалён. Создайте новый →');
   }
 
@@ -626,6 +653,7 @@ async function refreshInbox({ append = false } = {}) {
   const total = Number(pagination.total || 0);
   state.emailCounts[state.selected] = total > 0 ? total : state.emails.length;
   state.hasMore = Boolean(pagination.hasMore ?? (batch.length >= limit));
+  updateLatestTimestamp();
 
   const mailbox = state.selected;
   const mbState = getMailboxReadState(mailbox);
@@ -659,6 +687,84 @@ async function refreshInbox({ append = false } = {}) {
   const unread = state.unreadCounts[mailbox] || 0;
   const totalText = state.emailCounts[mailbox] || loaded;
   setStatus(`${state.selected} • ${loaded}/${totalText} писем • непрочитанных: ${unread} • ${new Date().toLocaleTimeString('ru-RU', { timeZone: MOSCOW_TZ, hour: '2-digit', minute: '2-digit' })} МСК`);
+}
+
+function closeSSE() {
+  if (state.sse) {
+    state.sse.close();
+    state.sse = null;
+  }
+  state.sseConnected = false;
+  state.sseFailures = 0;
+}
+
+function setupSSE() {
+  closeSSE();
+  if (!state.selected || !window.EventSource) return;
+
+  const url = `api/stream?email=${encodeURIComponent(state.selected)}`;
+  const sse = new EventSource(url);
+  state.sse = sse;
+
+  sse.addEventListener('open', () => {
+    state.sseConnected = true;
+    state.sseFailures = 0;
+  });
+
+  const refreshFromEvent = () => {
+    fetchIncrementalInbox().catch(() => {});
+  };
+
+  sse.addEventListener('new-email', refreshFromEvent);
+  sse.addEventListener('heartbeat', () => {});
+  sse.addEventListener('mailbox-cleared', () => {
+    if (!state.selected) return;
+    state.emails = [];
+    state.emailCounts[state.selected] = 0;
+    state.unreadCounts[state.selected] = 0;
+    resetPagingState();
+    state.selectedEmailId = null;
+    state.selectedEmail = null;
+    renderViewer(null);
+    renderInbox();
+    renderMailboxes();
+  });
+
+  sse.onerror = () => {
+    state.sseConnected = false;
+    state.sseFailures += 1;
+    if (state.sseFailures >= 3) {
+      closeSSE();
+    }
+  };
+}
+
+async function fetchIncrementalInbox() {
+  if (!state.selected) return;
+
+  const sinceTs = Math.max(0, Number(state.latestTimestamp || 0));
+  const resp = await api(`api/emails?email=${encodeURIComponent(state.selected)}&since_ts=${sinceTs}&limit=${state.fetchLimit}`);
+  const incoming = normalizeEmails(resp);
+  if (!incoming.length) return;
+
+  const mailbox = state.selected;
+  const mbState = getMailboxReadState(mailbox);
+  for (const msg of incoming) {
+    const id = String(msg.id || '');
+    if (!id) continue;
+    if (!mbState.seen[id]) {
+      mbState.seen[id] = Date.now();
+      mbState.unread[id] = true;
+    }
+  }
+  saveReadState();
+
+  state.emails = mergeUniqueEmails(state.emails, incoming);
+  state.emailCounts[mailbox] = Math.max(state.emailCounts[mailbox] || 0, state.emails.length);
+  recomputeUnreadForMailbox(mailbox);
+  updateLatestTimestamp();
+  renderInbox();
+  renderMailboxes();
 }
 
 async function loadMoreInbox() {
@@ -794,7 +900,8 @@ function setupAutoRefresh() {
   state.autoTimer = null;
   if (!$('autorefresh').checked) return;
   state.autoTimer = setInterval(() => {
-    refreshInbox({ append: false }).catch(() => {});
+    if (state.sseConnected) fetchIncrementalInbox().catch(() => {});
+    else refreshInbox({ append: false }).catch(() => {});
   }, 5000);
 }
 
@@ -851,7 +958,10 @@ async function init() {
     setStatus('Загрузка…');
     await loadSettings();
     await loadMailboxes();
-    if (state.selected) await refreshInbox({ append: false });
+    if (state.selected) {
+      await refreshInbox({ append: false });
+      setupSSE();
+    }
     setupAutoRefresh();
     if (!state.selected) setStatus('Создайте почтовый ящик →');
   } catch (e) {
@@ -859,5 +969,7 @@ async function init() {
     toast('Ошибка загрузки', 'error');
   }
 }
+
+window.addEventListener('beforeunload', () => closeSSE());
 
 init();
